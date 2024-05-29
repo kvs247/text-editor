@@ -1,21 +1,36 @@
 /*** includes ***/
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <errno.h>
-#include <unistd.h>
+#include <sys/ioctl.h>
 #include <termios.h>
+#include <unistd.h>
+
+/*** defines ***/
+
+#define CTRL_KEY(k) ((k) & 0x1f)
 
 /*** data ***/
 
-struct termios original_termios;
+struct editorConfig
+{
+  int screenrows;
+  int screencols;
+  struct termios orig_termios;
+};
+
+struct editorConfig E;
 
 /*** terminal ***/
 
 // error handling, use with library calls
 void die(const char *s)
 {
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[H", 3);
+
   perror(s);
   exit(1);
 }
@@ -23,7 +38,7 @@ void die(const char *s)
 // set terminal settings to original at program start
 void disableRawMode()
 {
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_termios) == -1)
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1)
   {
     die("tcsetattr");
   }
@@ -32,15 +47,15 @@ void disableRawMode()
 // edit terminal settings
 void enableRawMode()
 {
-  // get terminal settings at program start and write to "original_termios"
-  if (tcgetattr(STDIN_FILENO, &original_termios) == -1)
+  // get terminal settings at program start and write to "E.orig_termios"
+  if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1)
   {
     die("tcgetattr");
   }
   atexit(disableRawMode);
 
-  struct termios raw = original_termios;
-  
+  struct termios raw = E.orig_termios;
+
   // update various terminal flags
   raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
   raw.c_oflag &= ~(OPOST);
@@ -57,33 +72,141 @@ void enableRawMode()
   }
 }
 
+// read 1 byte from stdin into "c" until all bytes have been read
+char editorReadKey()
+{
+  int nRead;
+  char c;
+  while ((nRead = read(STDIN_FILENO, &c, 1)) != 1)
+  {
+    if (nRead == -1 && errno != EAGAIN)
+    {
+      die("read");
+    }
+  }
+  return c;
+}
+
+// fallback for getting window size
+int getCursorPosition(int *rows, int *cols)
+{
+  char buf[32];
+  unsigned int i = 0;
+
+  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4)
+  {
+    return -1;
+  }
+
+  while (i < sizeof(buf) - 1)
+  {
+    if (read(STDIN_FILENO, &buf[i], 1) != 1)
+    {
+      break;
+    }
+    if (buf[i] == 'R') {
+      break;
+    }
+    i++;
+  }
+  buf[i] = '\0';
+
+  if (buf[0] != '\x1b' || buf[1] != '[')
+  {
+    return -1;
+  }
+  if (sscanf(&buf[2], "%d;%d", rows, cols) != 2)
+  {
+    return -1;
+  }
+
+  return 0;
+}
+
+int getWindowSize(int *rows, int *cols)
+{
+  struct winsize ws;
+
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
+  {
+    // if ioctl doesn't work, do it manually
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12)
+    {
+      return -1;
+    }
+    return getCursorPosition(rows, cols);
+  }
+  else
+  {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
+}
+
+/*** output ***/
+
+void editorDrawRows()
+{
+  int y;
+  for (y = 0; y < E.screenrows; y++)
+  {
+    write(STDOUT_FILENO, "~", 1);
+
+    if (y < E.screenrows - 1)
+    {
+      write(STDOUT_FILENO, "\r\n", 2);
+    }
+  }
+}
+
+void editorRefreshScreen()
+{
+  // "\x1b" = escape
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[H", 3);
+
+  editorDrawRows();
+
+  write(STDOUT_FILENO, "\x1b[H", 3);
+}
+
+/*** input ***/
+
+// map ascii inputs to functionality
+void editorProcessKeypress()
+{
+  char c = editorReadKey();
+
+  switch (c)
+  {
+  case CTRL_KEY('q'):
+    write(STDOUT_FILENO, "\x1b[2J", 4);
+    write(STDOUT_FILENO, "\x1b[H", 3);
+    exit(0);
+    break;
+  }
+}
+
 /*** init ***/
+
+void initEditor()
+{
+  if (getWindowSize(&E.screenrows, &E.screencols) == -1)
+  {
+    die("getWindowSize");
+  }
+}
 
 int main()
 {
   enableRawMode();
+  initEditor();
 
   while (1)
   {
-    char c = '\0';
-
-    // read 1 byte from stdin into "c" until all bytes have been read
-    if (read(STDIN_FILENO, &c, 1) == -1 && errno != EAGAIN)
-    {
-      die("read");
-    }
-    // display keypresses
-    if (iscntrl(c))
-    {
-      printf("%d\r\n", c);
-    }
-    else
-    {
-      printf("%d ('%c')\r\n", c, c);
-    }
-    // quit program
-    if (c == 'q')
-      break;
+    editorRefreshScreen();
+    editorProcessKeypress();
   }
 
   return 0;
