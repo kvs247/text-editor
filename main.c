@@ -4,18 +4,35 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
 /*** defines ***/
 
+#define VERSION "0.0.1"
+
 #define CTRL_KEY(k) ((k) & 0x1f)
+
+enum editorKey
+{
+  ARROW_LEFT = 1000,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  DEL_KEY,
+  HOME_KEY,
+  END_KEY,
+  PAGE_UP,
+  PAGE_DOWN
+};
 
 /*** data ***/
 
 struct editorConfig
 {
+  int cx, cy;
   int screenrows;
   int screencols;
   struct termios orig_termios;
@@ -59,7 +76,7 @@ void enableRawMode()
   // update various terminal flags
   raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
   raw.c_oflag &= ~(OPOST);
-  raw.c_cflag |= ~(CS8);
+  raw.c_cflag |= (CS8);
   raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
 
   // set "read" to timeout after 100ms & return after 1 byte recieved
@@ -73,7 +90,7 @@ void enableRawMode()
 }
 
 // read 1 byte from stdin into "c" until all bytes have been read
-char editorReadKey()
+int editorReadKey()
 {
   int nRead;
   char c;
@@ -84,7 +101,85 @@ char editorReadKey()
       die("read");
     }
   }
-  return c;
+
+  if (c == '\x1b')
+  {
+    char seq[3];
+
+    if (read(STDIN_FILENO, &seq[0], 1) != 1)
+    {
+      return '\x1b';
+    }
+    if (read(STDIN_FILENO, &seq[1], 1) != 1)
+    {
+      return '\x1b';
+    }
+
+    if (seq[0] == '[')
+    {
+      if (seq[1] >= '0' && seq[1] <= '9')
+      {
+        if (read(STDIN_FILENO, &seq[2], 1) != 1)
+        {
+          return '\x1b';
+        }
+        if (seq[2] == '~')
+        {
+          switch (seq[1])
+          {
+          case '1':
+            return HOME_KEY;
+          case '3':
+            return DEL_KEY;
+          case '4':
+            return END_KEY;
+          case '5':
+            return PAGE_UP;
+          case '6':
+            return PAGE_DOWN;
+          case '7':
+            return HOME_KEY;
+          case '8':
+            return END_KEY;
+          }
+        }
+      }
+      else
+      {
+        switch (seq[1])
+        {
+        case 'A':
+          return ARROW_UP;
+        case 'B':
+          return ARROW_DOWN;
+        case 'C':
+          return ARROW_RIGHT;
+        case 'D':
+          return ARROW_LEFT;
+        case 'H':
+          return HOME_KEY;
+        case 'F':
+          return END_KEY;
+        }
+      }
+    }
+    else if (seq[0] == 'O')
+    {
+      switch (seq[1])
+      {
+        case 'H':
+          return HOME_KEY;
+        case 'F':
+          return END_KEY;
+      }
+    }
+
+    return '\x1b';
+  }
+  else
+  {
+    return c;
+  }
 }
 
 // fallback for getting window size
@@ -104,7 +199,8 @@ int getCursorPosition(int *rows, int *cols)
     {
       break;
     }
-    if (buf[i] == 'R') {
+    if (buf[i] == 'R')
+    {
       break;
     }
     i++;
@@ -144,39 +240,135 @@ int getWindowSize(int *rows, int *cols)
   }
 }
 
+/*** append buffer ***/
+
+struct abuf
+{
+  char *b;
+  int len;
+};
+
+#define ABUF_INIT \
+  {               \
+    NULL, 0       \
+  }
+
+void abAppend(struct abuf *ab, const char *s, int len)
+{
+  char *new = realloc(ab->b, ab->len + len);
+  if (new == NULL)
+  {
+    return;
+  }
+
+  memcpy(&new[ab->len], s, len);
+  ab->b = new;
+  ab->len += len;
+}
+
+void abFree(struct abuf *ab)
+{
+  free(ab->b);
+}
+
 /*** output ***/
 
-void editorDrawRows()
+void editorDrawRows(struct abuf *ab)
 {
   int y;
   for (y = 0; y < E.screenrows; y++)
   {
-    write(STDOUT_FILENO, "~", 1);
+    if (y == E.screenrows / 3)
+    {
+      char welcome[80];
+      int welcomeLength = snprintf(welcome, sizeof(welcome),
+                                   "Text editor -- version %s", VERSION);
+      if (welcomeLength > E.screencols)
+      {
+        welcomeLength = E.screencols;
+      }
+      int padding = (E.screencols - welcomeLength) / 2;
+      if (padding)
+      {
+        abAppend(ab, "~", 1);
+        padding--;
+      }
+      while (padding--)
+      {
+        abAppend(ab, " ", 1);
+      }
+      abAppend(ab, welcome, welcomeLength);
+    }
+    else
+    {
+      abAppend(ab, "~", 1);
+    }
 
+    abAppend(ab, "\x1b[K", 3); // clear line
     if (y < E.screenrows - 1)
     {
-      write(STDOUT_FILENO, "\r\n", 2);
+      abAppend(ab, "\r\n", 2);
     }
   }
 }
 
 void editorRefreshScreen()
 {
+  struct abuf ab = ABUF_INIT;
+
   // "\x1b" = escape
-  write(STDOUT_FILENO, "\x1b[2J", 4);
-  write(STDOUT_FILENO, "\x1b[H", 3);
+  abAppend(&ab, "\x1b[?25l", 6); // hide curosr
+  abAppend(&ab, "\x1b[H", 3);    // reset cursor
 
-  editorDrawRows();
+  editorDrawRows(&ab);
 
-  write(STDOUT_FILENO, "\x1b[H", 3);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+  abAppend(&ab, buf, strlen(buf));
+
+  abAppend(&ab, "\x1b[?25h", 6); // show cursor
+
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
 }
 
 /*** input ***/
 
-// map ascii inputs to functionality
+void editorMoveCursor(int key)
+{
+  switch (key)
+  {
+  case ARROW_LEFT:
+    if (E.cx != 0)
+    {
+      E.cx--;
+    }
+    break;
+  case ARROW_RIGHT:
+    if (E.cx != E.screencols - 1)
+    {
+      E.cx++;
+    }
+    break;
+  case ARROW_UP:
+    if (E.cy != 0)
+    {
+      E.cy--;
+    }
+    break;
+  case ARROW_DOWN:
+    if (E.cy != E.screenrows - 1)
+    {
+      E.cy++;
+    }
+    break;
+  }
+}
+
+// map inputs to functionality
 void editorProcessKeypress()
 {
-  char c = editorReadKey();
+  int c = editorReadKey();
 
   switch (c)
   {
@@ -185,6 +377,32 @@ void editorProcessKeypress()
     write(STDOUT_FILENO, "\x1b[H", 3);
     exit(0);
     break;
+
+  case HOME_KEY:
+    E.cx = 0;
+    break;
+
+  case END_KEY:
+    E.cx = E.screencols - 1;
+    break;
+
+  case PAGE_UP:
+  case PAGE_DOWN:
+  {
+    int times = E.screenrows;
+    while (times--)
+    {
+      editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+    }
+  }
+  break;
+
+  case ARROW_UP:
+  case ARROW_DOWN:
+  case ARROW_LEFT:
+  case ARROW_RIGHT:
+    editorMoveCursor(c);
+    break;
   }
 }
 
@@ -192,6 +410,9 @@ void editorProcessKeypress()
 
 void initEditor()
 {
+  E.cx = 0;
+  E.cy = 0;
+
   if (getWindowSize(&E.screenrows, &E.screencols) == -1)
   {
     die("getWindowSize");
