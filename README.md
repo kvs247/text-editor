@@ -1,6 +1,6 @@
 # Simple Text Editor
 
-This is a basic text editor application built by following a tutorial. It provides fundamental functionalities such as creating, opening, and saving text files. 
+This is a basic text editor application built by following a tutorial.
 
 ## Features
 

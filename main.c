@@ -1,11 +1,5 @@
 /*** includes ***/
 
-/* multi line comment */
-
-/* actual
-  multiline
-  comment */
-
 // feature test macro(s?)
 #define _DEFAULT_SOURCE
 #define _BSD_SOURCE
